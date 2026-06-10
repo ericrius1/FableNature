@@ -3,7 +3,7 @@ import { PointerLockControls } from 'three/addons/controls/PointerLockControls.j
 import {
   color, float, vec2, vec3, vec4, mix, smoothstep, screenUV, pass, uniform,
   Fn, Loop, dot, exp, length, normalize, select, time, cameraPosition,
-  mx_noise_float,
+  mx_noise_float, fract, sin,
 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { createTerrain, terrainHeight } from './terrain.js';
@@ -123,8 +123,10 @@ const uSunScreen = uniform(new THREE.Vector2(0.5, 0.4));
 const uRayStrength = uniform(0);
 
 const godRays = Fn(() => {
-  const suv = screenUV.toVar();
   const delta = uSunScreen.sub(screenUV).mul(0.9 / RAY_SAMPLES);
+  // per-pixel jitter hides banding from the low sample count
+  const jitter = fract(sin(dot(screenUV, vec2(12.9898, 78.233))).mul(43758.5453));
+  const suv = screenUV.add(delta.mul(jitter)).toVar();
   const decay = float(1).toVar();
   const acc = vec3(0).toVar();
   Loop(RAY_SAMPLES, () => {
@@ -152,9 +154,33 @@ overlay.style.cssText = `
 overlay.innerHTML = '<div>Click to walk<br><span style="font-size:14px;opacity:0.8">WASD move &middot; Shift run &middot; mouse look &middot; Esc release</span></div>';
 document.body.appendChild(overlay);
 
-overlay.addEventListener('click', () => controls.lock());
+// Pointer lock can be denied (e.g. sandboxed preview iframes). When that
+// happens, switch to drag-look so the scene stays navigable.
+let fallbackLook = false;
+let dragLooking = false;
+
+document.addEventListener('pointerlockerror', () => {
+  if (fallbackLook) return;
+  fallbackLook = true;
+  overlay.style.display = 'none';
+  const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+  renderer.domElement.addEventListener('mousedown', () => { dragLooking = true; });
+  window.addEventListener('mouseup', () => { dragLooking = false; });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragLooking) return;
+    euler.setFromQuaternion(camera.quaternion);
+    euler.y -= e.movementX * 0.0025;
+    euler.x = THREE.MathUtils.clamp(euler.x - e.movementY * 0.0025, -1.4, 1.4);
+    camera.quaternion.setFromEuler(euler);
+  });
+});
+
+overlay.addEventListener('click', () => { if (!fallbackLook) controls.lock(); });
 controls.addEventListener('lock', () => { overlay.style.display = 'none'; });
-controls.addEventListener('unlock', () => { overlay.style.display = 'flex'; });
+// Overlay only shows on first load — after unlock, click canvas to re-lock (clean screenshots).
+renderer.domElement.addEventListener('click', () => {
+  if (!fallbackLook && !controls.isLocked) controls.lock();
+});
 
 const keys = new Set();
 window.addEventListener('keydown', (e) => keys.add(e.code));
@@ -176,7 +202,7 @@ function updateSun() {
 
   // fade the rays out as the sun leaves the view
   camera.getWorldDirection(camDir);
-  uRayStrength.value = THREE.MathUtils.smoothstep(camDir.dot(sunDir), 0.05, 0.45) * 3.2;
+  uRayStrength.value = THREE.MathUtils.smoothstep(camDir.dot(sunDir), 0.05, 0.45) * 2.6;
 }
 
 window.addEventListener('resize', () => {
@@ -186,12 +212,14 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-if (import.meta.env.DEV) window.__debug = { camera, sunDir };
+if (import.meta.env.DEV) {
+  window.__debug = { camera, sunDir, controls, keys, isFallback: () => fallbackLook };
+}
 
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
 
-  if (controls.isLocked) {
+  if (controls.isLocked || fallbackLook) {
     const speed = keys.has('ShiftLeft') || keys.has('ShiftRight') ? 10 : 4.5;
     const tF = (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0);
     const tR = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
